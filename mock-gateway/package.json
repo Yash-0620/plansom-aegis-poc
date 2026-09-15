@@ -1,9 +1,11 @@
 {
   "name": "plansom-mock-gateway",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "type": "module",
   "dependencies": {
     "express": "^4.19.2",
-    "pg": "^8.11.5"
+    "pg": "^8.11.5",
+    "jsonwebtoken": "^9.0.2",
+    "ajv": "^8.12.0"
   }
 }

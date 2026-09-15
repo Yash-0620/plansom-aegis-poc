@@ -12,8 +12,11 @@ services:
 
   plansom-gateway:
     build: ./mock-gateway
+    ports:
+      - "8000:8000"
     environment:
       - DATABASE_URL=postgres://postgres:postgres@postgres-db:5432/plansom_db
+      - ENTRA_JWT_SECRET=plansom-entra-agent-mock-secret-2026
     depends_on:
       - postgres-db
     networks:
