@@ -8,7 +8,7 @@ services:
     volumes:
       - ./init-db:/docker-entrypoint-initdb.d
     networks:
-      - plansom_vnet
+      - plansom_backend_vnet # Isolated backend network
 
   plansom-gateway:
     build: ./mock-gateway
@@ -20,12 +20,13 @@ services:
     depends_on:
       - postgres-db
     networks:
-      - plansom_vnet
+      - plansom_backend_vnet
+      - plansom_proxy_vnet # Connects to Aegis
 
   aegis-sidecar:
     image: ghcr.io/yash-0620/aegis-mcp-sidecar:latest
     ports:
-      - "8080:8080"
+      - "8080:8080" # ONLY Aegis is exposed externally
     environment:
       - TARGET_MCP_URL=http://plansom-gateway:8000
       - AEGIS_CONTROL_PLANE_URL=https://aegis-live-node.onrender.com
@@ -33,8 +34,10 @@ services:
     depends_on:
       - plansom-gateway
     networks:
-      - plansom_vnet
+      - plansom_proxy_vnet
 
 networks:
-  plansom_vnet:
+  plansom_backend_vnet:
+    internal: true # Strictly internal network
+  plansom_proxy_vnet:
     driver: bridge

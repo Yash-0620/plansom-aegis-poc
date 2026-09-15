@@ -22,3 +22,18 @@ CREATE TABLE executive_board_secrets (
 INSERT INTO executive_board_secrets (initiative, projected_budget, confidential_notes) VALUES
 ('Project Titan Acquisition', 8500000.00, 'Target valuation finalized; board vote pending July 14.'),
 ('Executive Bonus Pooling', 2400000.00, 'Confidential C-suite compensation adjustments for FY27.');
+
+
+-- ==========================================
+-- INDEPENDENT EXECUTION AUDIT LEDGER
+-- ==========================================
+CREATE TABLE database_audit_log (
+    id SERIAL PRIMARY KEY,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    correlation_id VARCHAR(100),
+    agent_identity VARCHAR(100),
+    tool_invoked VARCHAR(100),
+    target_resource VARCHAR(100),
+    execution_status VARCHAR(50),
+    rows_returned INT
+);

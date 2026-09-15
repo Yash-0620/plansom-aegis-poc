@@ -2,283 +2,186 @@
 
 ## 🎯 Value Objective
 
-This Proof of Concept (POC) demonstrates why **Microsoft Agentic Security** — including **Azure API Management (APIM), Prompt Shields, and Microsoft Entra ID** — and the **Aegis Zero-Trust Sidecar** are complementary layers of a defense-in-depth architecture.
+This Proof of Concept (POC) is a controlled, comparative security evaluation. It benchmarks a Microsoft security baseline — **Microsoft Entra ID + Azure API Management (APIM)** — against an architecture augmented with the **Aegis Layer 7 Zero-Trust Sidecar**.
 
-Microsoft Agentic Security excels at protecting the **cognitive, identity, and static perimeter boundaries**. It can block unauthenticated access and enforce static API JSON schemas.
+The central hypothesis is whether identity, API-gateway, MCP-gateway, and agent-governance controls remain sufficient when authorization must be **cryptographically bound to an individual tool invocation, its parameters, resource scope, and validity window**.
 
-However, a critical **contextual execution gap** can remain at runtime.
+Microsoft's agentic security controls are effective at protecting cognitive, identity, and static perimeter boundaries. However, a **contextual execution gap** can remain at runtime.
 
-A conventional database service account or Entra role may authenticate a request successfully, and an APIM schema may validate the payload structure, without understanding the **contextual boundaries of the agent's delegation scope**.
+For example, an agent may possess a broad downstream role but, due to hallucination, prompt manipulation, or compromised decision-making, request resources outside the scope of its intended delegation. A valid identity and a statically valid API schema do not necessarily prevent this type of **Confused Deputy** scenario.
 
-This creates the potential for a **Confused Deputy** scenario, where a highly privileged agent is tricked or hallucinates a request for data outside its authorized departmental scope.
-
-This repository demonstrates how **Aegis closes this contextual execution gap** by enforcing dynamic, Layer 7 **Invocation-Bound Capability Tokens (IBCT)** at the point of execution.
-
-### Core Principle
-
-> **Microsoft protects the cognitive, identity, and static perimeter boundaries. Aegis protects the contextual runtime execution boundary.**
+This repository demonstrates how **Aegis closes this contextual execution gap** by enforcing dynamic, Layer 7 **Invocation-Bound Capability Tokens (IBCT)** independently of downstream database IAM.
 
 ---
 
 ## 🏗️ Architecture Flow
 
-The POC runs a localized, containerized pipeline simulating Plansom's delegation engine and directly compares:
+The POC runs a localized, containerized pipeline that simulates Plansom's delegation engine and directly compares the Microsoft Baseline against the Aegis Layer 7 proxy.
 
-1. A **Microsoft Baseline** using Entra ID + Azure API Management
-2. The **Aegis L7 Zero-Trust Proxy** using contextual IBCT enforcement
+An independent PostgreSQL execution ledger provides evidence of whether a request actually reached the downstream database.
 
 ```text
                          User Delegation Prompt
                                   │
                                   ▼
-             ┌──────────────────────────────────────────┐
-             │ Microsoft Orchestrator                  │
-             │ Semantic Kernel                          │
-             │                                          │
-             │ Prompt → MCP / Function Invocation      │
-             └────────────────────┬─────────────────────┘
-                                  │
-                       ┌──────────┴──────────┐
-                       │                     │
-                       ▼                     ▼
-             ┌─────────────────┐   ┌─────────────────┐
-             │ Microsoft       │   │ Aegis           │
-             │ Baseline        │   │ Zero-Trust      │
-             │                 │   │ Sidecar         │
-             │ • Entra Role    │   │                 │
-             │ • APIM Schema   │   │ • L7 Policy     │
-             │ • Static Checks │   │ • IBCT Eval     │
-             └────────┬────────┘   └────────┬────────┘
-                      │                     │
-                      ▼                     ▼
-                  Target DB             Target DB
+              ┌─────────────────────────────────────┐
+              │ Microsoft Orchestrator /            │
+              │ Semantic Kernel                      │
+              │                                     │
+              │ Prompt → MCP / Function Invocation  │
+              └──────────────────┬──────────────────┘
+                                 │
+                       ┌─────────┴─────────┐
+                       │                   │
+                       ▼                   ▼
+              ┌────────────────┐   ┌────────────────┐
+              │ MS Baseline    │   │ Aegis Proxy    │
+              │                │   │                │
+              │ APIM Schema    │   │ L7 Sidecar     │
+              │ Entra Role     │   │ IBCT Evaluation│
+              └───────┬────────┘   └───────┬────────┘
+                      │                    │
+                      ▼                    ▼
+                 ┌─────────┐          ┌─────────┐
+                 │ Target  │          │ Target  │
+                 │   DB    │          │   DB    │
+                 │         │          │         │
+                 │ Audit   │          │ Audit   │
+                 │ Ledger  │          │ Ledger  │
+                 └─────────┘          └─────────┘
 ```
 
-### Enforcement Boundary
+### Request Processing
 
-The key difference is **what each layer understands**:
+The two paths are evaluated independently:
+
+**Microsoft Baseline**
+
+1. Establish caller identity through Entra ID.
+2. Validate the request against the API schema.
+3. Apply the configured role and gateway controls.
+4. Forward the request to the downstream database if permitted.
+
+**Aegis Path**
+
+1. Establish caller identity.
+2. Validate the request through the gateway.
+3. Evaluate the Invocation-Bound Capability Token (IBCT).
+4. Validate the requested tool, parameters, resource scope, and validity window.
+5. Reject unauthorized invocations at Layer 7.
+6. Forward only surviving requests to the downstream database.
+
+---
+
+## 📊 The 12-Point Attack Harness
+
+The test suite, `advanced_attack_harness.py`, evaluates **12 distinct runtime delegation scenarios** to identify where perimeter controls succeed and where contextual execution gaps remain.
+
+For a complete breakdown of the individual attack vectors, see [`THREAT_MODEL.md`](THREAT_MODEL.md).
+
+### Benchmark Highlights
+
+#### ✅ Standard Perimeter Threats
+
+The Microsoft baseline successfully blocks several conventional security violations, including:
+
+* **T02** — Unauthenticated requests
+* **T03** — Corrupted or invalid JWTs
+* **T04** — Insufficient Entra roles
+* **T05** — Static API schema violations
+
+These controls demonstrate the effectiveness of identity and traditional gateway-level enforcement.
+
+#### ❌ Residual Runtime Threats
+
+The POC focuses on scenarios such as **T06, T07, and T10**, where an agent possesses a valid identity and submits a syntactically valid request for a resource outside its delegated scope.
+
+For example, an invocation may request:
 
 ```text
-Microsoft Baseline
-──────────────────
-Identity ──► "Is this caller authenticated?"
-Schema  ──► "Is this payload structurally valid?"
-
-Aegis
-─────
-Identity + Invocation Context
-        │
-        ├── Who is calling?
-        ├── What tool is being invoked?
-        ├── What resource is being requested?
-        └── Is this invocation within the agent's
-            delegated capability boundary?
+executive_board
 ```
 
----
-
-## 📊 Matrix Benchmark Scenarios & Outcomes
-
-The test suite, [`run_matrix_benchmark.py`](./run_matrix_benchmark.py), evaluates four runtime delegation scenarios to establish where baseline perimeter defenses succeed and where contextual runtime authorization is required.
-
-### Benchmark Summary
-
-| Scenario | Attack / Request      | Microsoft Baseline |         Aegis L7 Proxy | Result             |
-| -------- | --------------------- | -----------------: | ---------------------: | ------------------ |
-| 1        | Legitimate HR Read    |      ✅ ALLOW (200) |  ✅ ALLOW (200) ~39.6ms | Both secure        |
-| 2        | Confused Deputy       | ❌ VULNERABLE (200) | ✅ SECURE (422) ~14.8ms | **Aegis contains** |
-| 3        | Direct Schema Breach  |     ✅ SECURE (400) | ✅ SECURE (422) ~13.7ms | Both secure        |
-| 4        | Authentication Bypass |     ✅ SECURE (401) | ✅ SECURE (401) ~11.0ms | Both secure        |
-
-> **Key finding:** The benchmark isolates a class of runtime authorization failure that can occur even when authentication and static payload validation succeed.
-
----
-
-## Scenario 1: Legitimate HR Read
-
-### Objective
-
-The agent requests authorized HR planning data within its delegated scope.
-
-**Request context:**
-
-```json
-{
-  "department": "hr_department",
-  "data_type": "goals"
-}
-```
-
-Both platforms successfully validate the request and permit execution.
-
-| System             | Decision      | Latency |
-| ------------------ | ------------- | ------: |
-| Microsoft Baseline | ✅ ALLOW (200) |       — |
-| Aegis L7 Proxy     | ✅ ALLOW (200) | ~39.6ms |
-
-### Outcome
-
-The request is authorized and reaches the target database.
-
-This demonstrates that Aegis does **not** interfere with legitimate delegated operations.
-
----
-
-## Scenario 2: Confused Deputy — The Residual Execution Gap
-
-### Objective
-
-The agent requests data belonging to another department:
-
-```json
-{
-  "department": "executive_board",
-  "data_type": "goals"
-}
-```
-
-### Microsoft Baseline
-
-The value `executive_board` is structurally valid according to the APIM JSON schema.
-
-The agent also possesses a broad `Agent.Planning.Read` Entra role.
-
-As a result, the baseline gateway can authenticate the request and validate its structure without evaluating whether the requested department falls within the agent's **contextual delegation scope**.
-
-**Baseline result:**
-
-```text
-VULNERABLE
-HTTP 200
-Data leaked
-```
-
-### Aegis Containment
-
-Aegis evaluates the invocation against the agent's Invocation-Bound Capability Token.
-
-The capability restricts the department to:
+while the agent's delegated capability is constrained to:
 
 ```regex
 ^hr_department$
 ```
 
-The request therefore fails contextual authorization:
+Because `executive_board` is still a valid value according to the static API schema, the Microsoft baseline can allow the request to proceed when the identity and role are otherwise valid.
+
+This creates the contextual execution gap demonstrated by the POC.
+
+#### 🛡️ Aegis Containment
+
+Aegis evaluates the invocation context at Layer 7.
+
+When the requested resource violates the agent's invocation-specific capability constraint, Aegis rejects the request before it reaches the downstream database.
+
+Example outcome:
 
 ```text
-'executive_board' does not match '^hr_department$'
+HTTP 422 / 403
+Request terminated at Layer 7
+0 bytes forwarded downstream
+0 database queries executed
 ```
 
-**Aegis result:**
+---
+
+## 📋 Independent Database Execution Ledger
+
+To demonstrate that Aegis operates as an actual **network enforcement boundary** rather than merely a passive monitoring component, the PostgreSQL database is configured with an execution ledger:
 
 ```text
-SECURE
-HTTP 422 Unprocessable Entity
+database_audit_log
 ```
 
-The packet is rejected at Layer 7 before reaching the database.
+The ledger records downstream execution activity and provides an independent way to verify whether a request actually reached the database.
 
-### Outcome
+### Microsoft Baseline
 
-| System             | Decision   | Result                         |
-| ------------------ | ---------- | ------------------------------ |
-| Microsoft Baseline | ❌ HTTP 200 | **VULNERABLE — Data leaked**   |
-| Aegis L7 Proxy     | ✅ HTTP 422 | **SECURE — Request contained** |
+For out-of-scope invocations such as T06 and T07, the corresponding correlation IDs appear in the database execution ledger.
 
-> **This is the central execution-gap scenario demonstrated by the POC.**
+This demonstrates that:
 
----
-
-## Scenario 3: Unauthorized Parameter — Direct Schema Breach
-
-### Objective
-
-The agent attempts to submit an out-of-bounds parameter:
-
-```json
-{
-  "department": "finance_treasury",
-  "data_type": "goals"
-}
+```text
+Malicious / out-of-scope invocation
+            ↓
+Microsoft Baseline
+            ↓
+Database
+            ↓
+SQL query executed
+            ↓
+Rows returned
 ```
 
-Unlike Scenario 2, this value violates the **static API schema**.
+### Aegis Proxy
 
-Azure API Management correctly detects and rejects the structurally invalid request.
+The same malicious payloads are rejected at the Layer 7 boundary:
 
-### Outcome
-
-| System             | Decision       | Latency |
-| ------------------ | -------------- | ------: |
-| Microsoft Baseline | ✅ SECURE (400) |       — |
-| Aegis L7 Proxy     | ✅ SECURE (422) | ~13.7ms |
-
-### Security Significance
-
-This scenario demonstrates that the Microsoft baseline controls **work as intended** for static schema violations.
-
-Aegis is therefore not positioned as a replacement for APIM validation. It provides an additional contextual authorization layer.
-
----
-
-## Scenario 4: Direct Authentication Bypass
-
-### Objective
-
-An unauthenticated request is sent without a valid Entra token or IBCT.
-
-Microsoft Entra ID correctly rejects the request.
-
-### Outcome
-
-| System             | Decision       | Latency |
-| ------------------ | -------------- | ------: |
-| Microsoft Baseline | ✅ SECURE (401) |       — |
-| Aegis L7 Proxy     | ✅ SECURE (401) | ~11.0ms |
-
-### Security Significance
-
-This confirms that the **identity boundary remains effective**.
-
-Aegis complements identity enforcement rather than replacing it.
-
----
-
-# 📋 Observed Telemetry
-
-Aegis emits structured stdout audit logs capturing runtime execution decisions for security observability and audit workflows.
-
-## Permitted Invocation — Scenario 1
-
-```json
-{
-  "correlation_id": "req_e8f1ba8d",
-  "requesting_identity": "plansom-hr-delegation-agent",
-  "tool_action": "fetch_planning_data",
-  "resource_context": {
-    "raw_target": "{\"department\": \"hr_department\", \"data_type\": \"goals\"}"
-  },
-  "policy_decision": "PERMIT",
-  "reason": "Mathematical bounds verified"
-}
+```text
+Malicious / out-of-scope invocation
+            ↓
+Aegis L7 Sidecar
+            ↓
+IBCT validation
+            ↓
+Request rejected
+            ↓
+Database never reached
 ```
 
-## Denied Invocation — Confused Deputy / Scenario 2
+The expected ledger evidence is:
 
-```json
-{
-  "correlation_id": "req_7b88b28d",
-  "requesting_identity": "plansom-hr-delegation-agent",
-  "tool_action": "fetch_planning_data",
-  "resource_context": {
-    "raw_target": "{\"department\": \"executive_board\", \"data_type\": \"goals\"}"
-  },
-  "policy_decision": "DENY",
-  "reason": "Schema breach: 'executive_board' does not match '^hr_department$'"
-}
+```text
+0 bytes forwarded
+0 queries executed
+0 rows returned
 ```
 
-These events provide a machine-readable audit trail for downstream security monitoring, incident investigation, and compliance workflows.
+This provides an independent execution-level demonstration of the enforcement boundary.
 
 ---
 
@@ -286,35 +189,26 @@ These events provide a machine-readable audit trail for downstream security moni
 
 ## Prerequisites
 
-Install the following:
+Ensure the following are installed:
 
-* Docker
+* [Docker](https://www.docker.com/)
 * Docker Compose
 * Python 3.10+
-* A valid Aegis API key
+* An Aegis API key
 
 ---
 
-## 1. Clone the Repository
-
-```bash
-git clone https://github.com/your-org/plansom-aegis-poc.git
-cd plansom-aegis-poc
-```
-
----
-
-## 2. Configure Environment Variables
+## 1. Configure Environment Variables
 
 Create a `.env` file in the repository root:
 
-```env
+```dotenv
 AEGIS_API_KEY=your_aegis_ciso_key
 ```
 
-> ⚠️ **Do not commit `.env` or API credentials to Git.**
+> **Security:** Do not commit `.env` or API credentials to the repository.
 
-Make sure `.env` is included in `.gitignore`:
+A corresponding `.gitignore` entry should include:
 
 ```gitignore
 .env
@@ -322,9 +216,9 @@ Make sure `.env` is included in `.gitignore`:
 
 ---
 
-## 3. Deploy the Execution Perimeter
+## 2. Deploy the Execution Perimeter
 
-Start the PostgreSQL target, mock Plansom gateway, Microsoft baseline components, and Aegis sidecar:
+Start the PostgreSQL target, mock Plansom gateway, and Aegis sidecar:
 
 ```bash
 docker-compose up -d --build
@@ -338,182 +232,138 @@ docker-compose ps
 
 ---
 
-## 4. Execute the Defense-in-Depth Matrix Benchmark
+## 3. Execute the 12-Point Attack Harness
 
 Run the benchmark simulation:
 
 ```bash
-python run_matrix_benchmark.py
+python advanced_attack_harness.py
 ```
 
-The benchmark executes all four scenarios and compares the Microsoft baseline against the Aegis L7 execution boundary.
+The harness sends the defined test scenarios through both network paths and compares their outcomes.
+
+The resulting output can be used to compare:
+
+* Authentication behavior
+* Role enforcement
+* Schema validation
+* Invocation-level authorization
+* Resource-scope enforcement
+* Downstream execution
+* Database audit results
 
 ---
 
-## 5. Inspect the Aegis Audit Stream
+## 4. Verify the Database Execution Ledger
 
-View the Aegis sidecar logs:
-
-```bash
-docker-compose logs aegis-sidecar
-```
-
-For live streaming:
+Extract the execution evidence directly from PostgreSQL:
 
 ```bash
-docker-compose logs -f aegis-sidecar
+docker-compose exec postgres-db \
+  psql -U postgres -d plansom_db \
+  -c "SELECT correlation_id, tool_invoked, target_resource, execution_status, rows_returned FROM database_audit_log ORDER BY timestamp DESC LIMIT 15;"
 ```
+
+This allows the benchmark results to be independently correlated with actual downstream database execution.
 
 ---
 
 # 🔐 Security Model
 
-The POC demonstrates a layered security architecture:
+The POC demonstrates a **decoupled, defense-in-depth security model**.
 
-| Layer                                  | Security Responsibility                                        | Example                     |
-| -------------------------------------- | -------------------------------------------------------------- | --------------------------- |
-| **Identity**                           | Establish who is making the request                            | Microsoft Entra ID          |
-| **Static Schema Verification**         | Ensure JSON payload structures are valid                       | Azure API Management (APIM) |
-| **Contextual Execution Authorization** | Enforce agent-specific delegation limits at runtime            | **Aegis L7 Sidecar**        |
-| **Capability Binding**                 | Bind permitted actions and resources to the invocation context | **IBCT**                    |
-| **Downstream Target**                  | Execute requests that survive the policy boundary              | PostgreSQL                  |
+| Layer                          | Security Responsibility                                | Enforcement Mechanism       |
+| ------------------------------ | ------------------------------------------------------ | --------------------------- |
+| **Identity**                   | Establish who is making the request                    | Microsoft Entra ID          |
+| **Static Schema Verification** | Ensure JSON payloads are structurally valid            | Azure API Management (APIM) |
+| **Execution Authorization**    | Enforce contextual delegation limits at runtime        | **Aegis L7 Sidecar**        |
+| **Downstream Target**          | Execute surviving requests and maintain an audit trail | PostgreSQL                  |
 
-### Static vs. Contextual Authorization
+## Core Security Property
 
-The distinction demonstrated by this POC is:
+The key security property demonstrated by the POC is:
 
-```text
-STATIC AUTHORIZATION
-────────────────────
+> **Authorization decisions are cryptographically bound to the specific tool, parameters, resource scope, and validity window of an individual invocation.**
 
-"Is this request structurally valid?"
+This authorization is enforced immediately before downstream execution and is independent of the downstream database's IAM configuration.
 
-        │
-        ▼
-   APIM Schema
-        │
-        ├── Valid ──────► Continue
-        └── Invalid ────► Reject
-
-
-CONTEXTUAL AUTHORIZATION
-────────────────────────
-
-"Is this specific action authorized
-for this specific agent in this
-specific delegation context?"
-
-        │
-        ▼
-   Aegis IBCT
-        │
-        ├── Authorized ─► Continue
-        └── Unauthorized ► Reject
-```
-
-The key security property is that **authorization is enforced contextually on the actual runtime invocation**, preventing the Confused Deputy problem even when broad identity roles and static schemas are satisfied.
-
----
-
-# 🛡️ Defense-in-Depth Positioning
-
-The POC is intended to demonstrate complementary controls rather than competing security products.
+This creates a layered security model:
 
 ```text
-┌──────────────────────────────────────────────────┐
-│                    USER / AGENT                  │
-└────────────────────────┬─────────────────────────┘
-                         │
-                         ▼
-┌──────────────────────────────────────────────────┐
-│ Microsoft Entra ID                              │
-│ Identity & Authentication                        │
-└────────────────────────┬─────────────────────────┘
-                         │
-                         ▼
-┌──────────────────────────────────────────────────┐
-│ Azure Prompt Shields / Cognitive Controls        │
-│ Prompt & Intent Safety                           │
-└────────────────────────┬─────────────────────────┘
-                         │
-                         ▼
-┌──────────────────────────────────────────────────┐
-│ Azure API Management                             │
-│ Static API / JSON Schema Validation              │
-└────────────────────────┬─────────────────────────┘
-                         │
-                         ▼
-┌──────────────────────────────────────────────────┐
-│ Semantic Kernel                                  │
-│ Agent Orchestration / Function Invocation       │
-└────────────────────────┬─────────────────────────┘
-                         │
-                         ▼
-┌──────────────────────────────────────────────────┐
-│ Aegis Zero-Trust Sidecar                        │
-│ Dynamic Contextual Execution Authorization      │
-│                                                  │
-│ IBCT + Tool + Resource + Parameter Constraints  │
-└────────────────────────┬─────────────────────────┘
-                         │
-                         ▼
-┌──────────────────────────────────────────────────┐
-│ Downstream Database / Service                    │
-└──────────────────────────────────────────────────┘
+Identity
+   │
+   ▼
+Static API Controls
+   │
+   ▼
+MCP / Gateway Controls
+   │
+   ▼
+Aegis Invocation-Bound Authorization
+   │
+   ▼
+Downstream Execution
+   │
+   ▼
+Independent Audit Ledger
 ```
 
----
-
-# ⚠️ Disclaimer
-
-## Defense-in-Depth, Not a Replacement
-
-This POC does **not** suggest that Microsoft Agentic Security is broken or ineffective.
-
-As demonstrated by Scenarios 3 and 4:
-
-* **Microsoft Entra ID** effectively enforces identity boundaries.
-* **Azure API Management** effectively enforces static API/schema constraints.
-* **Prompt Shields and related cognitive controls** provide important protection at the cognitive boundary.
-
-Aegis provides a **complementary runtime execution boundary** for contextual authorization of autonomous agent actions.
-
-The purpose of this POC is to demonstrate that **authentication and static schema validation do not necessarily establish contextual authorization for every autonomous agent action**.
+Each layer addresses a different part of the request lifecycle rather than relying on a single authorization mechanism.
 
 ---
 
-## Simulated Target
+# 🧪 What This POC Demonstrates
 
-The downstream database is an **isolated local PostgreSQL container**, and the MCP gateway is a mock implementation.
+The benchmark is designed to answer a specific security question:
 
-This POC does **not** connect to Plansom's live Azure production virtual network or production databases.
+> **Is a valid identity + valid role + valid API schema sufficient to authorize an agent's runtime tool invocation?**
+
+The POC demonstrates that these controls can be insufficient when authorization depends on **dynamic invocation context**.
+
+Aegis introduces an additional authorization boundary that evaluates:
+
+* **Who** is making the request
+* **Which tool** is being invoked
+* **Which parameters** are being supplied
+* **Which resource** is being targeted
+* **What scope** the agent has been delegated
+* **How long** the authorization remains valid
+* **Whether the invocation matches the cryptographically bound capability**
+
+The result is a security boundary between an agent's decision to invoke a tool and the actual execution of that tool against a downstream resource.
 
 ---
 
-## POC Scope
+# ⚠️ Documentation & Limitations
 
-This demonstration focuses specifically on the distinction between:
+For the complete security analysis, review the supplementary documentation included in this repository.
 
-* Authentication
-* Static schema validation
-* Contextual runtime authorization
-* Agent-specific delegation boundaries
+### [`THREAT_MODEL.md`](THREAT_MODEL.md)
 
-A production deployment would require additional defense-in-depth controls covering areas such as:
+Contains the formal threat model and the 12-point attack matrix, including scenarios covering:
 
-* Prompt injection
-* Jailbreaks
-* Identity and access management
-* Agent memory poisoning
-* Tool poisoning
-* Supply-chain security
-* Untrusted external data
-* Output validation
-* Data exfiltration
-* Secrets management
-* Network security
-* Downstream service authorization
-* Monitoring and incident response
+* Authentication failures
+* JWT manipulation
+* Role escalation
+* Static schema violations
+* Cryptographic token tampering
+* Exact capability replay
+* Resource-scope violations
+* Cross-department data access
+* Runtime delegation abuse
+
+### [`LIMITATIONS.md`](LIMITATIONS.md)
+
+Documents:
+
+* The scope of the local POC
+* Intentional network port mappings
+* Simulated Microsoft components
+* Production Azure equivalents
+* Assumptions made by the benchmark
+* Boundaries of the experimental environment
+
+> **Important:** This repository is a security Proof of Concept and benchmark environment. It should not be interpreted as a production deployment blueprint without appropriate security review, threat modeling, operational hardening, and validation against the target production environment.
 
 ---
 
@@ -522,73 +372,100 @@ A production deployment would require additional defense-in-depth controls cover
 ```text
 plansom-aegis-poc/
 │
-├── run_matrix_benchmark.py     # Side-by-side execution benchmark
+├── advanced_attack_harness.py
+│   └── 12-point side-by-side execution test suite
 │
-├── docker-compose.yml          # Local POC infrastructure
+├── docker-compose.yml
+│   └── Local POC infrastructure
 │
-├── mock-gateway/               # Microsoft baseline and upstream endpoints
+├── mock-gateway/
+│   └── server.js
+│       └── Gateway logic and audit-routing behavior
 │
-├── init-db/                    # PostgreSQL schema and initialization
+├── init-db/
+│   └── 01-init.sql
+│       └── Database initialization and execution ledger
 │
-├── .env                        # Local credentials (not committed)
+├── THREAT_MODEL.md
+│   └── Formal threat model and attack definitions
 │
-├── .gitignore
+├── LIMITATIONS.md
+│   └── Technical scope and POC constraints
+│
+├── .env
+│   └── Local credentials — not committed
 │
 └── README.md
+    └── Project documentation
 ```
 
 ---
 
-# 🧪 Expected Result
+# 🔎 Expected Security Boundary
 
-When the benchmark is executed, the key security distinction should look like this:
+The intended architectural distinction can be summarized as follows:
 
 ```text
-                     Agent Invocation
-                            │
-                            ▼
-                 ┌────────────────────┐
-                 │ Is caller valid?   │
-                 └─────────┬──────────┘
-                           │
-                           ▼
-                    Entra / Identity
-                           │
-                           ▼
-                 ┌────────────────────┐
-                 │ Is payload valid?  │
-                 └─────────┬──────────┘
-                           │
-                           ▼
-                      APIM Schema
-                           │
-                           ▼
-              ┌───────────────────────────┐
-              │ Is THIS action authorized │
-              │ for THIS agent/context?   │
-              └─────────────┬─────────────┘
-                            │
-                            ▼
-                       Aegis IBCT
-                       /        \
-                      /          \
-                   DENY          PERMIT
-                    │              │
-                    ▼              ▼
-                 HTTP 422       HTTP 200
-                    │              │
-                    ▼              ▼
-              No DB Request    Target DB
+                 STATIC AUTHORIZATION
+                 ────────────────────
+                 "Who are you?"
+                       │
+                       ▼
+                 "What role do
+                  you have?"
+                       │
+                       ▼
+                 "Is this request
+                  structurally valid?"
+                       │
+                       ▼
+              ─────────────────────
+              CONTEXTUAL AUTHORIZATION
+              ─────────────────────
+                 "What exactly is
+                  this invocation
+                  authorized to do?"
+                       │
+                       ▼
+                 Tool + Parameters
+                 + Resource Scope
+                 + Validity Window
+                       │
+                       ▼
+                Downstream Execution
 ```
 
-## Key Takeaway
+The purpose of the Aegis layer is **not to replace identity, API management, MCP security, or downstream IAM**.
 
-The POC demonstrates a fundamental distinction in autonomous-agent security:
+Instead, it adds an independent runtime authorization boundary for the specific execution context of an individual tool invocation.
 
-> **"Is the request authenticated and structurally valid?" is not always equivalent to "Is this specific runtime action authorized for this agent?"**
+---
 
-Microsoft's identity, cognitive, and API perimeter controls address important parts of the security boundary.
+# 📌 Summary
 
-**Aegis adds contextual, invocation-level authorization at the execution boundary.**
+This POC provides a controlled side-by-side evaluation of:
 
-Together, these layers provide a stronger **defense-in-depth architecture for autonomous agent execution**.
+| Capability                                    | Microsoft Baseline | Aegis-Augmented Architecture |
+| --------------------------------------------- | :----------------: | :--------------------------: |
+| Identity validation                           |          ✅         |               ✅              |
+| JWT validation                                |          ✅         |               ✅              |
+| Role enforcement                              |          ✅         |               ✅              |
+| Static API schema validation                  |          ✅         |               ✅              |
+| Runtime resource-scope validation             |       Limited      |                ✅              |
+| Invocation-bound authorization                |          —         |                ✅              |
+| Parameter-level capability enforcement        |       Limited      |                ✅              |
+| Cryptographically bound execution capability  |          —         |                ✅              |
+| Layer 7 enforcement before database execution |       Limited      |                ✅              |
+| Independent downstream execution evidence     |          ✅         |               ✅              |
+
+**Core takeaway:** traditional identity and perimeter controls establish whether a caller is generally permitted to access an API, while the Aegis Layer 7 sidecar adds an invocation-specific authorization boundary that evaluates whether the **exact requested operation** is permitted within the agent's delegated capability.
+
+---
+
+## 📚 Additional Documentation
+
+* [`THREAT_MODEL.md`](THREAT_MODEL.md) — Threat model and 12-point attack matrix
+* [`LIMITATIONS.md`](LIMITATIONS.md) — POC scope, assumptions, and limitations
+* `advanced_attack_harness.py` — Executable benchmark
+* `docker-compose.yml` — Local infrastructure definition
+* `init-db/01-init.sql` — Database execution ledger

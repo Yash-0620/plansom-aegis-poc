@@ -2,6 +2,7 @@ import express from 'express';
 import pg from 'pg';
 import jwt from 'jsonwebtoken';
 import Ajv from 'ajv';
+import crypto from 'crypto';
 
 const { Pool } = pg;
 const app = express();
@@ -33,8 +34,9 @@ const pool = new Pool({
 });
 
 // Helper: Query PostgreSQL and record downstream execution metrics
-async function executeDatabaseQuery(department, data_type) {
+async function executeDatabaseQuery(correlation_id, agent_identity, department, data_type) {
     let queryText = '';
+    
     if (department === 'hr_department') {
         queryText = 'SELECT * FROM hr_planning_data;';
     } else if (department === 'executive_board') {
@@ -43,7 +45,24 @@ async function executeDatabaseQuery(department, data_type) {
         throw new Error(`Target table unreachable for department: ${department}`);
     }
 
+    // 1. Execute the actual query
     const result = await pool.query(queryText);
+    
+    // 2. Independently log the execution to the database audit table
+    const auditQuery = `
+        INSERT INTO database_audit_log 
+        (correlation_id, agent_identity, tool_invoked, target_resource, execution_status, rows_returned) 
+        VALUES ($1, $2, $3, $4, $5, $6)
+    `;
+    await pool.query(auditQuery, [
+        correlation_id || 'req_unknown', 
+        agent_identity || 'Unknown-Agent', 
+        'fetch_planning_data', 
+        department, 
+        'EXECUTED', 
+        result.rowCount
+    ]);
+
     return {
         query: queryText,
         rowCount: result.rowCount,
@@ -93,14 +112,17 @@ app.post('/ms-baseline/mcp/v1/tools/call', async (req, res) => {
 
     // 3. Downstream Execution
     try {
+        const correlationId = req.headers['x-correlation-id'] || `req_ms_${crypto.randomUUID().split('-')[0]}`;
+        const agentIdentity = decoded.sub || "Unknown-Entra-Agent";
+        
         const { department, data_type } = args;
-        const dbResult = await executeDatabaseQuery(department, data_type);
+        const dbResult = await executeDatabaseQuery(correlationId, agentIdentity, department, data_type);
         
         console.log(`[MS-Baseline APIM] PERMITTED -> Executed: "${dbResult.query}" | Rows Leaked: ${dbResult.rowCount}`);
         return res.status(200).json({
             status: "success",
             auth_layer: "Entra Agent ID + Azure APIM",
-            caller: decoded.sub,
+            caller: agentIdentity,
             executed_query: dbResult.query,
             records_returned: dbResult.rowCount,
             data: dbResult.rows
@@ -122,8 +144,11 @@ app.post('/mcp/v1/tools/call', async (req, res) => {
     }
 
     try {
+        const correlationId = req.headers['x-correlation-id'] || `req_aegis_${crypto.randomUUID().split('-')[0]}`;
+        const agentIdentity = req.headers['x-aegis-identity'] || "Aegis-Verified-Agent";
+
         const { department, data_type } = args;
-        const dbResult = await executeDatabaseQuery(department, data_type);
+        const dbResult = await executeDatabaseQuery(correlationId, agentIdentity, department, data_type);
 
         console.log(`[Aegis Upstream Gateway] Request processed via Aegis. Rows: ${dbResult.rowCount}`);
         return res.status(200).json({
