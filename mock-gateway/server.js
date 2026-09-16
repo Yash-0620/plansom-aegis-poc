@@ -160,23 +160,24 @@ app.post('/ms-baseline/mcp/v1/tools/call', async (req, res) => {
 app.post('/mcp/v1/tools/call', async (req, res) => {
     const toolName = req.body.name || req.body.params?.name;
     const args = req.body.arguments || req.body.params?.arguments || {};
-
+    
     if (toolName !== 'fetch_planning_data') {
         return res.status(404).json({ error: `Tool ${toolName} not supported` });
     }
 
+    const agentIdentity = req.headers['x-aegis-identity'];
+    if (!agentIdentity) {
+        return res.status(401).json({ error: "Missing x-aegis-identity assertion from proxy" });
+    }
+
     try {
         const correlationId = req.headers['x-correlation-id'] || `req_aegis_${crypto.randomUUID().split('-')[0]}`;
-        const agentIdentity = req.headers['x-aegis-identity'] || "Aegis-Verified-Agent";
-
         const { department, data_type } = args;
+        
         const dbResult = await executeDatabaseQuery(correlationId, agentIdentity, department, data_type);
-
-        console.log(`[Aegis Upstream Gateway] Request processed via Aegis. Rows: ${dbResult.rowCount}`);
         return res.status(200).json({
             status: "success",
-            auth_layer: "Aegis Invocation-Bound Proxy Verified",
-            executed_query: dbResult.query,
+            caller: agentIdentity,
             records_returned: dbResult.rowCount,
             data: dbResult.rows
         });

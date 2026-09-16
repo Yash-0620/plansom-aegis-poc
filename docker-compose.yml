@@ -1,3 +1,4 @@
+# plansom-aegis-poc/docker-compose.yml
 services:
   postgres-db:
     image: postgres:15-alpine
@@ -8,10 +9,13 @@ services:
     volumes:
       - ./init-db:/docker-entrypoint-initdb.d
     networks:
-      - plansom_backend_vnet # Isolated backend network
+      - plansom_backend_vnet
 
   plansom-gateway:
     build: ./mock-gateway
+    ports:
+      # Dedicated baseline port for benchmarking (simulates direct cloud gateway)
+      - "8001:8000"
     environment:
       - DATABASE_URL=postgres://postgres:postgres@postgres-db:5432/plansom_db
       - ENTRA_JWT_SECRET=plansom-entra-agent-mock-secret-2026
@@ -19,16 +23,19 @@ services:
       - postgres-db
     networks:
       - plansom_backend_vnet
-      - plansom_proxy_vnet # Connects to Aegis
+      - plansom_proxy_vnet
 
   aegis-sidecar:
     image: ghcr.io/yash-0620/aegis-mcp-sidecar:latest
     ports:
-      - "8080:8080" # ONLY Aegis is exposed externally
+      - "8080:8080" # ONLY the Aegis proxy routes traffic into the private mesh
     environment:
       - TARGET_MCP_URL=http://plansom-gateway:8000
       - AEGIS_CONTROL_PLANE_URL=https://aegis-live-node.onrender.com
       - AEGIS_API_KEY=${AEGIS_API_KEY}
+      - EXTERNAL_IDP_SECRET=plansom-entra-agent-mock-secret-2026
+      - REQUIRE_EXTERNAL_AUTH=true
+      - REQUIRED_EXTERNAL_ROLE=Agent.Planning.Read
     depends_on:
       - plansom-gateway
     networks:
@@ -36,6 +43,6 @@ services:
 
 networks:
   plansom_backend_vnet:
-    internal: true # Strictly internal network
+    internal: true
   plansom_proxy_vnet:
     driver: bridge
