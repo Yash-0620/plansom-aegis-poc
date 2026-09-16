@@ -45,29 +45,51 @@ async function executeDatabaseQuery(correlation_id, agent_identity, department, 
         throw new Error(`Target table unreachable for department: ${department}`);
     }
 
-    // 1. Execute the actual query
-    const result = await pool.query(queryText);
+    // Check out a dedicated client from the pool to isolate the session
+    const client = await pool.connect();
     
-    // 2. Independently log the execution to the database audit table
-    const auditQuery = `
-        INSERT INTO database_audit_log 
-        (correlation_id, agent_identity, tool_invoked, target_resource, execution_status, rows_returned) 
-        VALUES ($1, $2, $3, $4, $5, $6)
-    `;
-    await pool.query(auditQuery, [
-        correlation_id || 'req_unknown', 
-        agent_identity || 'Unknown-Agent', 
-        'fetch_planning_data', 
-        department, 
-        'EXECUTED', 
-        result.rowCount
-    ]);
+    try {
+        // Start a transaction. This ensures the identity setting is scoped ONLY to this request.
+        await client.query('BEGIN');
 
-    return {
-        query: queryText,
-        rowCount: result.rowCount,
-        rows: result.rows
-    };
+        // Pass the Entra/Aegis identity securely into the PostgreSQL execution context for RLS.
+        // We use set_config($1) instead of string interpolation to prevent SQL injection.
+        await client.query(`SELECT set_config('app.agent_identity', $1, true);`, [agent_identity || 'Unknown-Agent']);
+        
+        // 1. Execute the actual query (RLS will automatically filter the rows based on the identity)
+        const result = await client.query(queryText);
+        
+        // 2. Independently log the execution to the database audit table
+        const auditQuery = `
+            INSERT INTO database_audit_log 
+            (correlation_id, agent_identity, tool_invoked, target_resource, execution_status, rows_returned) 
+            VALUES ($1, $2, $3, $4, $5, $6)
+        `;
+        await client.query(auditQuery, [
+            correlation_id || 'req_unknown', 
+            agent_identity || 'Unknown-Agent', 
+            'fetch_planning_data', 
+            department, 
+            'EXECUTED', 
+            result.rowCount
+        ]);
+
+        // Commit the transaction
+        await client.query('COMMIT');
+
+        return {
+            query: queryText,
+            rowCount: result.rowCount,
+            rows: result.rows
+        };
+    } catch (error) {
+        // If anything fails, rollback the transaction
+        await client.query('ROLLBACK');
+        throw error;
+    } finally {
+        // CRITICAL: Always release the client back to the pool, even if an error occurred
+        client.release();
+    }
 }
 
 // -----------------------------------------------------------------------------

@@ -37,3 +37,24 @@ CREATE TABLE database_audit_log (
     execution_status VARCHAR(50),
     rows_returned INT
 );
+
+
+-- ==========================================
+-- ROW-LEVEL SECURITY (RLS) ENFORCEMENT
+-- ==========================================
+ALTER TABLE hr_planning_data ENABLE ROW LEVEL SECURITY;
+ALTER TABLE executive_board_secrets ENABLE ROW LEVEL SECURITY;
+
+-- HR Agents can only read HR data
+CREATE POLICY hr_agent_policy ON hr_planning_data
+    FOR SELECT 
+    USING (current_setting('app.agent_identity', true) = 'plansom-hr-agent');
+
+-- Only Executive Agents can read Exec data
+CREATE POLICY exec_agent_policy ON executive_board_secrets
+    FOR SELECT 
+    USING (current_setting('app.agent_identity', true) = 'plansom-executive-agent');
+
+-- Force RLS on the table owner
+ALTER TABLE hr_planning_data FORCE ROW LEVEL SECURITY;
+ALTER TABLE executive_board_secrets FORCE ROW LEVEL SECURITY;
