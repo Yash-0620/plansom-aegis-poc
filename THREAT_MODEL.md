@@ -3,7 +3,7 @@
 ## Objective
 This document outlines the formal threat model and the 14-point attack matrix used to benchmark the Microsoft security baseline against an architecture augmented with the Aegis Layer 7 Zero-Trust Sidecar. 
 
-The threat matrix relies on **independent downstream execution evidence** `(DB:1 or DB:0)`. By querying a restricted PostgreSQL audit table before and after each scenario, we programmatically verify whether a threat was neutralized at the network edge or if it breached the database engine[cite: 1].
+The threat matrix relies on **independent downstream execution evidence** `(DB:1 or DB:0)`. By querying a restricted PostgreSQL audit table before and after each scenario, we programmatically verify whether a threat was neutralized at the network edge or if it breached the database engine.
 
 ## Threat Matrix & Measured Evidence
 
@@ -27,13 +27,13 @@ The threat matrix relies on **independent downstream execution evidence** `(DB:1
 ## Key Findings & Boundary Analysis
 
 ### 1. The Contextual Execution Gap (T06, T07, T10)
-The Microsoft baseline successfully blocks malformed requests and unauthenticated access, yielding `(DB:0)`. However, it permits structurally valid payloads that violate the agent's contextual delegation. In T06, the MS Baseline processed the request all the way to the database `(DB:1)`. Aegis dynamically scoped the IBCT bounds using strict regex, neutralizing the threat at the proxy edge `(DB:0)`[cite: 1].
+The Microsoft baseline successfully blocks malformed requests and unauthenticated access, yielding `(DB:0)`. However, it permits structurally valid payloads that violate the agent's contextual delegation. In T06, the MS Baseline processed the request all the way to the database `(DB:1)`. Aegis dynamically scoped the IBCT bounds using strict regex, neutralizing the threat at the proxy edge `(DB:0)`.
 
 ### 2. Baseline Configuration Strengths (T09)
-The Microsoft Baseline proved effective at preventing Tool Substitution (T09). Because the baseline gateway was configured with explicit tool allowlisting, it successfully dropped unauthorized API calls `(DB:0)` before reaching the database, independently matching Aegis's containment properties[cite: 1].
+The Microsoft Baseline proved effective at preventing Tool Substitution (T09). Because the baseline gateway was configured with explicit tool allowlisting, it successfully dropped unauthorized API calls `(DB:0)` before reaching the database, independently matching Aegis's containment properties.
 
 ### 3. State & Replay Vulnerabilities (T13, T14)
-Static gateways evaluate structure, not execution state. The MS Baseline allowed the exact same authorized payload to be replayed, generating multiple execution records `(DB:1)`. Aegis utilizes a JTI nonce cache and strict TTL expirations, ensuring the payload is neutralized on the second attempt `(DB:0)`[cite: 1].
+Static gateways evaluate structure, not execution state. The MS Baseline allowed the exact same authorized payload to be replayed, generating multiple execution records `(DB:1)`. Aegis utilizes a JTI nonce cache and strict TTL expirations, ensuring the payload is neutralized on the second attempt `(DB:0)`.
 
 ### 4. Cross-Agent Use of Authorization Material (T08)
-If an attacker compromises Agent B and attempts to submit a valid capability token assigned to Agent A, a gateway strictly evaluating structural validity will process it `(DB:1)`. Aegis pins the `sub` claim of the Entra JWT to the `sub` claim of the capability token, blocking cross-agent misuse at the network edge `(DB:0)`[cite: 1].
+If an attacker compromises Agent B and attempts to submit a valid capability token assigned to Agent A, a gateway strictly evaluating structural validity will process it `(DB:1)`. Aegis pins the `sub` claim of the Entra JWT to the `sub` claim of the capability token, blocking cross-agent misuse at the network edge `(DB:0)`.

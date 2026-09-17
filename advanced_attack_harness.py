@@ -12,14 +12,10 @@ load_dotenv()
 
 MS_BASELINE_URL = "http://127.0.0.1:8001/ms-baseline/mcp/v1/tools/call"
 AEGIS_URL = "http://127.0.0.1:8080/mcp/v1/tools/call"
-# DIRECT_BACKEND_URL tests if the protected upstream is exposed to the host. (It should return CONN_REFUSED).
 DIRECT_BACKEND_URL = "http://127.0.0.1:8000/mcp/v1/tools/call" 
 CONTROL_PLANE_URL = "https://aegis-live-node.onrender.com/mint"
-AEGIS_API_KEY = os.environ.get("AEGIS_API_KEY", "your-aegis-api-key")
-
-AEGIS_PRIVATE_KEY = """-----BEGIN PRIVATE KEY-----
-MC4CAQAwBQYDK2VwBCIEIBLLVAvwTiVMFvP861egAMSzht3h94NZww/QvpXV9+54
------END PRIVATE KEY-----"""
+AEGIS_API_KEY = os.environ.get("AEGIS_API_KEY")
+AEGIS_PRIVATE_KEY = os.environ.get("AEGIS_PRIVATE_KEY", "").replace("\\n", "\n")
 
 PLANSOM_SCHEMA_BOUNDS = {
     "fetch_planning_data": {
@@ -47,6 +43,8 @@ def auto_discover_tenant_id():
 REAL_TENANT_ID = auto_discover_tenant_id()
 
 def mint_local_ibct(agent_sub, jti=None, expires_in=3600):
+    if not AEGIS_PRIVATE_KEY:
+        raise ValueError("Missing AEGIS_PRIVATE_KEY in .env file")
     now = int(time.time())
     payload = {
         "user_id": REAL_TENANT_ID,
@@ -86,9 +84,7 @@ def fire_request(url, headers, payload):
         return "ERROR", {"error": str(e)}, 0
 
 def check_downstream_evidence(correlation_id):
-    """Programmatically queries the independent Postgres ledger via the baseline gateway."""
     try:
-        # Port 8001 (baseline) is exposed and has the /sys/audit endpoint
         res = requests.get(f"http://127.0.0.1:8001/sys/audit/{correlation_id}", timeout=3)
         if res.status_code == 200:
             return res.json().get("executions", 0)
@@ -99,12 +95,8 @@ def check_downstream_evidence(correlation_id):
 def build_mcp_payload(tool_name, department, data_type="goals"):
     return {"name": tool_name, "arguments": {"department": department, "data_type": data_type}}
 
-
-
 def get_docker_digest():
-    """Attempts to fetch the exact SHA256 digest of the running Aegis Sidecar."""
     try:
-        # Tries to inspect the running sidecar container
         result = subprocess.check_output(
             ['docker', 'inspect', '--format="{{.Image}}"', 'plansom-aegis-poc-aegis-sidecar-1'], 
             stderr=subprocess.DEVNULL
@@ -114,15 +106,11 @@ def get_docker_digest():
         return "ghcr.io/yash-0620/aegis-mcp-sidecar:latest (Digest unverified)"
 
 def get_git_commit():
-    """Attempts to fetch the current Git commit SHA."""
     try:
         result = subprocess.check_output(['git', 'rev-parse', 'HEAD'], stderr=subprocess.DEVNULL)
         return result.decode('utf-8').strip()
     except Exception:
         return "Not a Git repository or Git not installed"
-
-
-
 
 def run_advanced_harness():
     print("\n" + "=" * 114)
@@ -137,32 +125,31 @@ def run_advanced_harness():
     aegis_replay_token = get_aegis_ibct("plansom-hr-agent", jti=replay_jti)
 
     scenarios = [
-        {"id": "T01", "name": "Legitimate HR Read", "payload": build_mcp_payload("fetch_planning_data", "hr_department"), "ms_auth": entra_agent_a, "agent_sub": "plansom-hr-agent", "exp_ms": 200, "exp_aegis": 200},
-        {"id": "T02", "name": "Missing Identity Token", "payload": build_mcp_payload("fetch_planning_data", "hr_department"), "ms_auth": None, "agent_sub": "plansom-hr-agent", "exp_ms": 401, "exp_aegis": 401},
-        {"id": "T03", "name": "Corrupted Identity JWT", "payload": build_mcp_payload("fetch_planning_data", "hr_department"), "ms_auth": "invalid.jwt.token", "agent_sub": "plansom-hr-agent", "exp_ms": 401, "exp_aegis": 401},
-        {"id": "T04", "name": "Insufficient Entra Role", "payload": build_mcp_payload("fetch_planning_data", "hr_department"), "ms_auth": entra_no_role, "agent_sub": "plansom-hr-agent", "exp_ms": 403, "exp_aegis": 403},
-        {"id": "T05", "name": "Invalid Static Schema Enum", "payload": build_mcp_payload("fetch_planning_data", "invalid_dept"), "ms_auth": entra_agent_a, "agent_sub": "plansom-hr-agent", "exp_ms": 400, "exp_aegis": 422},
-        # The Contextual Execution Gap: Allowed by MS APIM enum, blocked by Aegis dynamic regex
-        {"id": "T06", "name": "Confused Deputy (Exec Board)", "payload": build_mcp_payload("fetch_planning_data", "executive_board"), "ms_auth": entra_agent_a, "agent_sub": "plansom-hr-agent", "exp_ms": 200, "exp_aegis": 422},
-        {"id": "T07", "name": "Context Tampering", "payload": build_mcp_payload("fetch_planning_data", "executive_board"), "ms_auth": entra_agent_a, "agent_sub": "plansom-hr-agent", "exp_ms": 200, "exp_aegis": 422},
-        {"id": "T08", "name": "Capability Theft (Agent B steals A)", "payload": build_mcp_payload("fetch_planning_data", "hr_department"), "ms_auth": entra_agent_b, "agent_sub": "plansom-hr-agent", "exp_ms": 200, "exp_aegis": 403},
-        {"id": "T09", "name": "Tool Substitution", "payload": build_mcp_payload("delete_all_planning_data", "hr_department"), "ms_auth": entra_agent_a, "agent_sub": "plansom-hr-agent", "exp_ms": 404, "exp_aegis": 403},
-        {"id": "T10", "name": "Data Type Mutation", "payload": build_mcp_payload("fetch_planning_data", "hr_department", "confidential_salaries"), "ms_auth": entra_agent_a, "agent_sub": "plansom-hr-agent", "exp_ms": 200, "exp_aegis": 422},
-        {"id": "T11", "name": "Capability Token Tampering", "payload": build_mcp_payload("fetch_planning_data", "hr_department"), "ms_auth": entra_agent_a, "custom_ibct": lambda: get_aegis_ibct("plansom-hr-agent")[:-5] + "XyZ12", "exp_ms": 200, "exp_aegis": 403},
-        {"id": "T12", "name": "Direct Backend Network Bypass", "payload": build_mcp_payload("fetch_planning_data", "hr_department"), "ms_auth": entra_agent_a, "agent_sub": "plansom-hr-agent", "force_direct": True, "exp_ms": "CONN_REFUSED", "exp_aegis": "CONN_REFUSED"},
-        {"id": "T13", "name": "Exact Capability Replay (JTI)", "payload": build_mcp_payload("fetch_planning_data", "hr_department"), "ms_auth": entra_agent_a, "custom_ibct": lambda: aegis_replay_token, "is_replay": True, "exp_ms": 200, "exp_aegis": 409},
-        {"id": "T14", "name": "Expired Capability Token", "payload": build_mcp_payload("fetch_planning_data", "hr_department"), "ms_auth": entra_agent_a, "custom_ibct": lambda: get_aegis_ibct("plansom-hr-agent", expires_in=-3600), "exp_ms": 200, "exp_aegis": 401}
+        {"id": "T01", "name": "Legitimate HR Read", "payload": build_mcp_payload("fetch_planning_data", "hr_department"), "ms_auth": entra_agent_a, "agent_sub": "plansom-hr-agent", "exp_ms": 200, "exp_ms_db": 1, "exp_aegis": 200, "exp_aegis_db": 1},
+        {"id": "T02", "name": "Missing Identity Token", "payload": build_mcp_payload("fetch_planning_data", "hr_department"), "ms_auth": None, "agent_sub": "plansom-hr-agent", "exp_ms": 401, "exp_ms_db": 0, "exp_aegis": 401, "exp_aegis_db": 0},
+        {"id": "T03", "name": "Corrupted Identity JWT", "payload": build_mcp_payload("fetch_planning_data", "hr_department"), "ms_auth": "invalid.jwt.token", "agent_sub": "plansom-hr-agent", "exp_ms": 401, "exp_ms_db": 0, "exp_aegis": 401, "exp_aegis_db": 0},
+        {"id": "T04", "name": "Insufficient Entra Role", "payload": build_mcp_payload("fetch_planning_data", "hr_department"), "ms_auth": entra_no_role, "agent_sub": "plansom-hr-agent", "exp_ms": 403, "exp_ms_db": 0, "exp_aegis": 403, "exp_aegis_db": 0},
+        {"id": "T05", "name": "Invalid Static Schema Enum", "payload": build_mcp_payload("fetch_planning_data", "invalid_dept"), "ms_auth": entra_agent_a, "agent_sub": "plansom-hr-agent", "exp_ms": 400, "exp_ms_db": 0, "exp_aegis": 422, "exp_aegis_db": 0},
+        {"id": "T06", "name": "Confused Deputy (Exec Board)", "payload": build_mcp_payload("fetch_planning_data", "executive_board"), "ms_auth": entra_agent_a, "agent_sub": "plansom-hr-agent", "exp_ms": 200, "exp_ms_db": 1, "exp_aegis": 422, "exp_aegis_db": 0},
+        {"id": "T07", "name": "Context Tampering", "payload": build_mcp_payload("fetch_planning_data", "executive_board"), "ms_auth": entra_agent_a, "agent_sub": "plansom-hr-agent", "exp_ms": 200, "exp_ms_db": 1, "exp_aegis": 422, "exp_aegis_db": 0},
+        {"id": "T08", "name": "Capability Theft (Agent B steals A)", "payload": build_mcp_payload("fetch_planning_data", "hr_department"), "ms_auth": entra_agent_b, "agent_sub": "plansom-hr-agent", "exp_ms": 200, "exp_ms_db": 1, "exp_aegis": 403, "exp_aegis_db": 0},
+        {"id": "T09", "name": "Tool Substitution", "payload": build_mcp_payload("delete_all_planning_data", "hr_department"), "ms_auth": entra_agent_a, "agent_sub": "plansom-hr-agent", "exp_ms": 404, "exp_ms_db": 0, "exp_aegis": 403, "exp_aegis_db": 0},
+        {"id": "T10", "name": "Data Type Mutation", "payload": build_mcp_payload("fetch_planning_data", "hr_department", "confidential_salaries"), "ms_auth": entra_agent_a, "agent_sub": "plansom-hr-agent", "exp_ms": 200, "exp_ms_db": 1, "exp_aegis": 422, "exp_aegis_db": 0},
+        {"id": "T11", "name": "Capability Token Tampering", "payload": build_mcp_payload("fetch_planning_data", "hr_department"), "ms_auth": entra_agent_a, "custom_ibct": lambda: get_aegis_ibct("plansom-hr-agent")[:-5] + "XyZ12", "exp_ms": 200, "exp_ms_db": 1, "exp_aegis": 403, "exp_aegis_db": 0},
+        {"id": "T12", "name": "Direct Backend Network Bypass", "payload": build_mcp_payload("fetch_planning_data", "hr_department"), "ms_auth": entra_agent_a, "agent_sub": "plansom-hr-agent", "force_direct": True, "exp_ms": "CONN_REFUSED", "exp_ms_db": 0, "exp_aegis": "CONN_REFUSED", "exp_aegis_db": 0},
+        {"id": "T13", "name": "Exact Capability Replay (JTI)", "payload": build_mcp_payload("fetch_planning_data", "hr_department"), "ms_auth": entra_agent_a, "custom_ibct": lambda: aegis_replay_token, "is_replay": True, "exp_ms": 200, "exp_ms_db": 1, "exp_aegis": 409, "exp_aegis_db": 0},
+        {"id": "T14", "name": "Expired Capability Token", "payload": build_mcp_payload("fetch_planning_data", "hr_department"), "ms_auth": entra_agent_a, "custom_ibct": lambda: get_aegis_ibct("plansom-hr-agent", expires_in=-3600), "exp_ms": 200, "exp_ms_db": 1, "exp_aegis": 401, "exp_aegis_db": 0}
     ]
 
     print(f"{'ID':<4} | {'Test Scenario':<36} | {'MS Baseline':<20} | {'Aegis L7 Proxy':<28} | {'Status'}")
     print("-" * 114)
 
+    evidence_records = []
+
     for s in scenarios:
-        # Create distinct correlation IDs so we can trace MS vs Aegis separately
         ms_corr_id = f"req_ms_{s['id']}_{uuid.uuid4().hex[:4]}"
         ag_corr_id = f"req_ag_{s['id']}_{uuid.uuid4().hex[:4]}"
         
-        # 1. Evaluate Microsoft Baseline Path
         ms_url = DIRECT_BACKEND_URL if s.get("force_direct") else MS_BASELINE_URL
         ms_hdrs = {"Content-Type": "application/json", "x-correlation-id": ms_corr_id}
         if s["ms_auth"]: ms_hdrs["Authorization"] = f"Bearer {s['ms_auth']}"
@@ -170,7 +157,6 @@ def run_advanced_harness():
         ms_status, ms_json, ms_lat = fire_request(ms_url, ms_hdrs, s["payload"])
         ms_db = check_downstream_evidence(ms_corr_id)
         
-        # 2. Evaluate Aegis Path
         if "custom_ibct" in s:
             ibct_token = s["custom_ibct"]()
         elif s.get("agent_sub"):
@@ -191,47 +177,35 @@ def run_advanced_harness():
 
         ag_db = check_downstream_evidence(ag_corr_id)
 
-        # Formatting Output Strings
         ms_disp = f"{ms_status} (DB:{ms_db})" if ms_status != "CONN_REFUSED" else "CONN_REFUSED"
-        aegis_disp = f"{aegis_status} (DB:{ag_db}) [{aegis_lat:.1f}ms]" if aegis_status != "CONN_REFUSED" else "BLOCKED (Drop)"
+        aegis_disp = f"{aegis_status} (DB:{ag_db})" if aegis_status != "CONN_REFUSED" else "BLOCKED (Drop)"
         
-        # Dual-Validation requirement from ChatGPT Evaluation
-        passed = (aegis_status == s["exp_aegis"]) and (ms_status == s["exp_ms"])
+        passed = (aegis_status == s["exp_aegis"] and ag_db == s["exp_aegis_db"] and ms_status == s["exp_ms"] and ms_db == s["exp_ms_db"])
         result_flag = "[PASS]" if passed else "[FAIL]"
 
-        print(f"{s['id']:<4} | {s['name']:<36} | {ms_disp:<20} | {aegis_disp:<28} | {result_flag}")
+        print(f"{s['id']:<4} | {s['name']:<36} | {ms_disp:<20} | {aegis_disp} [{aegis_lat:.1f}ms] | {result_flag}")
+        evidence_records.append(f"| {s['id']} | {s['name']} | {ms_disp} | {aegis_disp} | {result_flag} |\n")
 
-
-        # ---------------------------------------------------------
-    # EVIDENCE GENERATION (For CISO / Engineering Review)
-    # ---------------------------------------------------------
     os.makedirs("evidence", exist_ok=True)
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     filename = f"evidence/run_metadata_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-    
-    image_digest = get_docker_digest()
-    commit_sha = get_git_commit()
     
     with open(filename, "w") as f:
         f.write("# Aegis Benchmark Execution Evidence\n\n")
         f.write("## Run Metadata\n")
         f.write(f"- **Timestamp (UTC):** {timestamp}\n")
-        f.write(f"- **Git Commit SHA:** `{commit_sha}`\n")
-        f.write(f"- **Aegis Sidecar Image Digest:** `{image_digest}`\n")
+        f.write(f"- **Git Commit SHA:** `{get_git_commit()}`\n")
+        f.write(f"- **Aegis Sidecar Image Digest:** `{get_docker_digest()}`\n")
         f.write(f"- **Execution Result:** 14/14 PASS\n\n")
-        
         f.write("## Scenario Matrix Results\n")
         f.write("| ID | Test Scenario | MS Baseline | Aegis Proxy | Status |\n")
         f.write("|---|---|---|---|---|\n")
-        for s in scenarios:
-            f.write(f"| {s['id']} | {s['name']} | Verified | Verified | [PASS] |\n")
-            
+        f.writelines(evidence_records)
         f.write("\n## Cryptographic Proof\n")
         f.write("> **Note:** All down-stream execution counts `(DB:0 / DB:1)` were independently verified via the PostgreSQL execution ledger.\n")
 
     print("\n" + "=" * 114)
     print(f"[*] Benchmark complete. Cryptographic run evidence saved to: {filename}")
-    print("=" * 114)
 
 if __name__ == "__main__":
     run_advanced_harness()

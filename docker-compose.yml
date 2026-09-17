@@ -18,7 +18,6 @@ services:
   baseline-gateway:
     build: ./mock-gateway
     ports:
-      # CRITICAL: This is the port the Python script needs to reach MS and the DB Ledger!
       - "8001:8000"
     environment:
       - DATABASE_URL=postgres://gateway_user:gateway_pass@postgres-db:5432/plansom_db
@@ -27,14 +26,13 @@ services:
       - postgres-db
     networks:
       - plansom_backend_vnet
-      - plansom_proxy_vnet
+      - plansom_public_vnet # Connects to host, but isolated from Aegis upstream
 
   # ---------------------------------------------------------
   # PATH B: ISOLATED PROTECTED UPSTREAM (AEGIS SECURED)
   # ---------------------------------------------------------
   protected-gateway:
     build: ./mock-gateway
-    # CRITICAL: No ports exposed. Fully isolated from the host.
     environment:
       - DATABASE_URL=postgres://gateway_user:gateway_pass@postgres-db:5432/plansom_db
       - ENTRA_JWT_SECRET=plansom-entra-agent-mock-secret-2026
@@ -42,7 +40,7 @@ services:
       - postgres-db
     networks:
       - plansom_backend_vnet
-      - plansom_proxy_vnet
+      - plansom_private_mesh # STRICTLY ISOLATED. Baseline cannot reach this.
 
   # ---------------------------------------------------------
   # THE AEGIS SIDECAR
@@ -61,10 +59,13 @@ services:
     depends_on:
       - protected-gateway
     networks:
-      - plansom_proxy_vnet
+      - plansom_public_vnet  # Receives external traffic
+      - plansom_private_mesh # Bridges traffic securely to the protected gateway
 
 networks:
   plansom_backend_vnet:
     internal: true
-  plansom_proxy_vnet:
+  plansom_private_mesh:
+    internal: true
+  plansom_public_vnet:
     driver: bridge
