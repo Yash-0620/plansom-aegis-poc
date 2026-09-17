@@ -11,32 +11,24 @@ app.use(express.json());
 const ENTRA_SECRET = process.env.ENTRA_JWT_SECRET || "plansom-entra-agent-mock-secret-2026";
 const ajv = new Ajv({ allErrors: true });
 
-// Azure APIM Content-Validation Schema for fetch_planning_data
 const toolParamSchema = {
     type: "object",
     required: ["department", "data_type"],
     properties: {
-        department: { 
-            type: "string", 
-            enum: ["hr_department", "executive_board"] 
-        },
-        data_type: { 
-            type: "string", 
-            enum: ["goals", "confidential_salaries"] 
-        }
+        department: { type: "string", enum: ["hr_department", "executive_board"] },
+        data_type: { type: "string", enum: ["goals", "confidential_salaries"] }
     },
     additionalProperties: false
 };
 const validateAPIMSchema = ajv.compile(toolParamSchema);
 
+// CHANGED: Fallback defaults to gateway_user explicitly ensuring NO BYPASS RLS
 const pool = new Pool({
-    connectionString: process.env.DATABASE_URL || 'postgres://postgres:postgres@postgres-db:5432/plansom_db'
+    connectionString: process.env.DATABASE_URL || 'postgres://gateway_user:gateway_pass@postgres-db:5432/plansom_db'
 });
 
-// Helper: Query PostgreSQL and record downstream execution metrics
 async function executeDatabaseQuery(correlation_id, agent_identity, department, data_type) {
     let queryText = '';
-    
     if (department === 'hr_department') {
         queryText = 'SELECT * FROM hr_planning_data;';
     } else if (department === 'executive_board') {
@@ -45,21 +37,17 @@ async function executeDatabaseQuery(correlation_id, agent_identity, department, 
         throw new Error(`Target table unreachable for department: ${department}`);
     }
 
-    // Check out a dedicated client from the pool to isolate the session
     const client = await pool.connect();
-    
     try {
-        // Start a transaction. This ensures the identity setting is scoped ONLY to this request.
         await client.query('BEGIN');
-
-        // Pass the Entra/Aegis identity securely into the PostgreSQL execution context for RLS.
-        // We use set_config($1) instead of string interpolation to prevent SQL injection.
+        
+        // Pass the identity securely into the PostgreSQL execution context for RLS
         await client.query(`SELECT set_config('app.agent_identity', $1, true);`, [agent_identity || 'Unknown-Agent']);
         
-        // 1. Execute the actual query (RLS will automatically filter the rows based on the identity)
+        // Query (RLS applies dynamically based on identity)
         const result = await client.query(queryText);
         
-        // 2. Independently log the execution to the database audit table
+        // Independently log the execution to the database audit table
         const auditQuery = `
             INSERT INTO database_audit_log 
             (correlation_id, agent_identity, tool_invoked, target_resource, execution_status, rows_returned) 
@@ -73,74 +61,72 @@ async function executeDatabaseQuery(correlation_id, agent_identity, department, 
             'EXECUTED', 
             result.rowCount
         ]);
-
-        // Commit the transaction
+        
         await client.query('COMMIT');
-
-        return {
-            query: queryText,
-            rowCount: result.rowCount,
-            rows: result.rows
-        };
+        return { query: queryText, rowCount: result.rowCount, rows: result.rows };
     } catch (error) {
-        // If anything fails, rollback the transaction
         await client.query('ROLLBACK');
         throw error;
     } finally {
-        // CRITICAL: Always release the client back to the pool, even if an error occurred
         client.release();
     }
 }
 
-// -----------------------------------------------------------------------------
+// =========================================================================
+// ADDED: INDEPENDENT AUDIT VERIFICATION ENDPOINT
+// This allows the test harness to programmatically assert DB execution.
+// =========================================================================
+app.get('/sys/audit/:correlationId', async (req, res) => {
+    const { correlationId } = req.params;
+    try {
+        const result = await pool.query('SELECT * FROM database_audit_log WHERE correlation_id = $1', [correlationId]);
+        return res.status(200).json({ executions: result.rowCount, records: result.rows });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+// -------------------------------------------------------------------------
 // PATH A: MICROSOFT BASELINE (Azure APIM + Entra Agent ID)
-// -----------------------------------------------------------------------------
+// -------------------------------------------------------------------------
 app.post('/ms-baseline/mcp/v1/tools/call', async (req, res) => {
+    const toolName = req.body.name || req.body.params?.name;
+    
+    //Reject tools outside the allowed API scope
+    if (toolName !== 'fetch_planning_data') {
+        return res.status(404).json({ error: `Tool ${toolName} not supported` });
+    }
     const authHeader = req.headers['authorization'];
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        return res.status(401).json({
-            error: "Unauthorized: Missing or malformed Entra ID Bearer token"
-        });
+        return res.status(401).json({ error: "Missing or malformed Entra token" });
     }
-
-    // 1. Authenticate Entra Agent ID JWT Claims
+    
     const token = authHeader.split(' ')[1];
     let decoded;
     try {
         decoded = jwt.verify(token, ENTRA_SECRET);
     } catch (err) {
-        return res.status(401).json({
-            error: `Entra Token Validation Failed: ${err.message}`
-        });
+        return res.status(401).json({ error: `Token Validation Failed: ${err.message}` });
     }
 
-    // Verify Agent has downstream database permissions
     const roles = decoded.roles || [];
     if (!roles.includes("Agent.Planning.Read")) {
-        return res.status(403).json({
-            error: "Forbidden: Agent lacks 'Agent.Planning.Read' app role"
-        });
+        return res.status(403).json({ error: "Forbidden: Lacks Agent.Planning.Read role" });
     }
 
-    // 2. Azure APIM Content Validation (JSON Schema Check)
     const args = req.body.arguments || req.body.params?.arguments || {};
-    const valid = validateAPIMSchema(args);
-    if (!valid) {
-        return res.status(400).json({
-            error: "APIM Content-Validation Failure: Request body violates schema",
-            validationErrors: validateAPIMSchema.errors
-        });
+    if (!validateAPIMSchema(args)) {
+        return res.status(400).json({ error: "APIM Validation Failure", validationErrors: validateAPIMSchema.errors });
     }
 
-    // 3. Downstream Execution
     try {
         const correlationId = req.headers['x-correlation-id'] || `req_ms_${crypto.randomUUID().split('-')[0]}`;
         const agentIdentity = decoded.sub || "Unknown-Entra-Agent";
-        
         const { department, data_type } = args;
-        const dbResult = await executeDatabaseQuery(correlationId, agentIdentity, department, data_type);
         
-        console.log(`[MS-Baseline APIM] PERMITTED -> Executed: "${dbResult.query}" | Rows Leaked: ${dbResult.rowCount}`);
+        const dbResult = await executeDatabaseQuery(correlationId, agentIdentity, department, data_type);
+        console.log(`[MS-Baseline] PERMITTED -> Executed: "${dbResult.query}" | Rows Leaked: ${dbResult.rowCount}`);
+        
         return res.status(200).json({
             status: "success",
             auth_layer: "Entra Agent ID + Azure APIM",
@@ -154,9 +140,9 @@ app.post('/ms-baseline/mcp/v1/tools/call', async (req, res) => {
     }
 });
 
-// -----------------------------------------------------------------------------
-// PATH B: UPSTREAM ENDPOINT (Protected by Aegis L7 Sidecar Proxy)
-// -----------------------------------------------------------------------------
+// -------------------------------------------------------------------------
+// PATH B: UPSTREAM ENDPOINT (Protected strictly by Aegis L7 Proxy)
+// -------------------------------------------------------------------------
 app.post('/mcp/v1/tools/call', async (req, res) => {
     const toolName = req.body.name || req.body.params?.name;
     const args = req.body.arguments || req.body.params?.arguments || {};
@@ -175,9 +161,12 @@ app.post('/mcp/v1/tools/call', async (req, res) => {
         const { department, data_type } = args;
         
         const dbResult = await executeDatabaseQuery(correlationId, agentIdentity, department, data_type);
+        console.log(`[Aegis Upstream Gateway] Request processed via Aegis. Rows: ${dbResult.rowCount}`);
+        
         return res.status(200).json({
             status: "success",
-            caller: agentIdentity,
+            auth_layer: "Aegis Invocation-Bound Proxy Verified",
+            executed_query: dbResult.query,
             records_returned: dbResult.rowCount,
             data: dbResult.rows
         });

@@ -1,4 +1,5 @@
-# plansom-aegis-poc/docker-compose.yml
+version: '3.8'
+
 services:
   postgres-db:
     image: postgres:15-alpine
@@ -11,13 +12,16 @@ services:
     networks:
       - plansom_backend_vnet
 
-  plansom-gateway:
+  # ---------------------------------------------------------
+  # PATH A: EXPOSED MICROSOFT BASELINE
+  # ---------------------------------------------------------
+  baseline-gateway:
     build: ./mock-gateway
     ports:
-      # Dedicated baseline port for benchmarking (simulates direct cloud gateway)
+      # CRITICAL: This is the port the Python script needs to reach MS and the DB Ledger!
       - "8001:8000"
     environment:
-      - DATABASE_URL=postgres://postgres:postgres@postgres-db:5432/plansom_db
+      - DATABASE_URL=postgres://gateway_user:gateway_pass@postgres-db:5432/plansom_db
       - ENTRA_JWT_SECRET=plansom-entra-agent-mock-secret-2026
     depends_on:
       - postgres-db
@@ -25,19 +29,37 @@ services:
       - plansom_backend_vnet
       - plansom_proxy_vnet
 
+  # ---------------------------------------------------------
+  # PATH B: ISOLATED PROTECTED UPSTREAM (AEGIS SECURED)
+  # ---------------------------------------------------------
+  protected-gateway:
+    build: ./mock-gateway
+    # CRITICAL: No ports exposed. Fully isolated from the host.
+    environment:
+      - DATABASE_URL=postgres://gateway_user:gateway_pass@postgres-db:5432/plansom_db
+      - ENTRA_JWT_SECRET=plansom-entra-agent-mock-secret-2026
+    depends_on:
+      - postgres-db
+    networks:
+      - plansom_backend_vnet
+      - plansom_proxy_vnet
+
+  # ---------------------------------------------------------
+  # THE AEGIS SIDECAR
+  # ---------------------------------------------------------
   aegis-sidecar:
     image: ghcr.io/yash-0620/aegis-mcp-sidecar:latest
     ports:
-      - "8080:8080" # ONLY the Aegis proxy routes traffic into the private mesh
+      - "8080:8080" 
     environment:
-      - TARGET_MCP_URL=http://plansom-gateway:8000
+      - TARGET_MCP_URL=http://protected-gateway:8000
       - AEGIS_CONTROL_PLANE_URL=https://aegis-live-node.onrender.com
       - AEGIS_API_KEY=${AEGIS_API_KEY}
       - EXTERNAL_IDP_SECRET=plansom-entra-agent-mock-secret-2026
       - REQUIRE_EXTERNAL_AUTH=true
       - REQUIRED_EXTERNAL_ROLE=Agent.Planning.Read
     depends_on:
-      - plansom-gateway
+      - protected-gateway
     networks:
       - plansom_proxy_vnet
 

@@ -1,3 +1,12 @@
+-- ==========================================
+-- 1. SECURE RUNTIME ROLE CREATION
+-- ==========================================
+-- Create a restricted role explicitly disabling superuser and RLS bypass capabilities
+CREATE ROLE gateway_user WITH LOGIN PASSWORD 'gateway_pass' NOSUPERUSER NOBYPASSRLS;
+
+-- ==========================================
+-- 2. SCHEMA & TABLE DEFINITIONS
+-- ==========================================
 -- Authorized Department: HR Planning (Permitted Target)
 CREATE TABLE hr_planning_data (
     id SERIAL PRIMARY KEY,
@@ -7,11 +16,11 @@ CREATE TABLE hr_planning_data (
     status VARCHAR(50)
 );
 
-INSERT INTO hr_planning_data (task_name, assignee, quarter, status) VALUES
+INSERT INTO hr_planning_data (task_name, assignee, quarter, status) VALUES 
 ('Q3 Onboarding Overhaul', 'sarah.ops@plansom.com', 'Q3', 'In Progress'),
 ('Engineering Career Ladders', 'david.hr@plansom.com', 'Q3', 'Completed');
 
--- Restricted Department: Executive Board Compensation & Strategic M&A (Restricted Target)
+-- Restricted Department: Executive Board Compensation (Restricted Target)
 CREATE TABLE executive_board_secrets (
     id SERIAL PRIMARY KEY,
     initiative VARCHAR(100),
@@ -19,14 +28,11 @@ CREATE TABLE executive_board_secrets (
     confidential_notes TEXT
 );
 
-INSERT INTO executive_board_secrets (initiative, projected_budget, confidential_notes) VALUES
+INSERT INTO executive_board_secrets (initiative, projected_budget, confidential_notes) VALUES 
 ('Project Titan Acquisition', 8500000.00, 'Target valuation finalized; board vote pending July 14.'),
 ('Executive Bonus Pooling', 2400000.00, 'Confidential C-suite compensation adjustments for FY27.');
 
-
--- ==========================================
--- INDEPENDENT EXECUTION AUDIT LEDGER
--- ==========================================
+-- Independent Execution Audit Ledger
 CREATE TABLE database_audit_log (
     id SERIAL PRIMARY KEY,
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -38,23 +44,30 @@ CREATE TABLE database_audit_log (
     rows_returned INT
 );
 
+-- ==========================================
+-- 3. PERMISSION GRANTS TO RESTRICTED ROLE
+-- ==========================================
+GRANT SELECT ON hr_planning_data TO gateway_user;
+GRANT SELECT ON executive_board_secrets TO gateway_user;
+GRANT SELECT, INSERT ON database_audit_log TO gateway_user;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO gateway_user;
 
 -- ==========================================
--- ROW-LEVEL SECURITY (RLS) ENFORCEMENT
+-- 4. ROW-LEVEL SECURITY (RLS) ENFORCEMENT
 -- ==========================================
 ALTER TABLE hr_planning_data ENABLE ROW LEVEL SECURITY;
 ALTER TABLE executive_board_secrets ENABLE ROW LEVEL SECURITY;
 
 -- HR Agents can only read HR data
 CREATE POLICY hr_agent_policy ON hr_planning_data
-    FOR SELECT 
+    FOR SELECT TO gateway_user
     USING (current_setting('app.agent_identity', true) = 'plansom-hr-agent');
 
 -- Only Executive Agents can read Exec data
 CREATE POLICY exec_agent_policy ON executive_board_secrets
-    FOR SELECT 
+    FOR SELECT TO gateway_user
     USING (current_setting('app.agent_identity', true) = 'plansom-executive-agent');
 
--- Force RLS on the table owner
+-- Force RLS on the table to ensure complete lockdown
 ALTER TABLE hr_planning_data FORCE ROW LEVEL SECURITY;
 ALTER TABLE executive_board_secrets FORCE ROW LEVEL SECURITY;
