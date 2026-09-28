@@ -46,7 +46,7 @@ services:
   # THE AEGIS SIDECAR
   # ---------------------------------------------------------
   aegis-sidecar:
-    image: ghcr.io/yash-0620/aegis-mcp-sidecar:latest
+    image: yash0620/aegis-mcp-sidecar:latest
     ports:
       - "8080:8080" 
     environment:
